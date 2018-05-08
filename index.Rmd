@@ -9,22 +9,156 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-## R Markdown
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+# Synopsis
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, the goal is to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants to predict the manner in which they did the exercise (the "classe" variable in the training set). 
+In the following we build a prediction model and compute the expected out of sample error. Then the prediction model is finally used to predict 20 different test cases.
 
-```{r cars}
-summary(cars)
+
+# Data Processing
+
+## Loading the data
+
+```{r, echo = TRUE }
+raw_training = read.csv("pml-training.csv")
+dim(raw_training)
+raw_testing = read.csv("pml-testing.csv")
+dim(raw_testing)
 ```
 
-## Including Plots
+## Preprocessing 
 
-You can also embed plots, for example:
+create a suitable training data set, by cleaning up the raw_training data   : <br>
+1) leaving only predictors that have less than 10% NA values <br>
+2) leaving predictors that have no more than 90% empty values <br>
+3) removing predictors that are not useful ('X' and timestamp values)<br>
 
-```{r pressure, echo=FALSE}
-plot(pressure)
+
+```{r, echo = TRUE }
+# 1 
+raw_training <- raw_training[, colSums(is.na(raw_training)) < nrow(raw_training) * 0.1]
+dim(raw_training)
+
+# 2
+raw_training <- raw_training[, colSums(raw_training == "") < nrow(raw_training) * 0.9]
+dim(raw_training)
+
+# 3
+good_training <- raw_training[ , -which(names(raw_training) %in% c("X","raw_timestamp_part_1", "raw_timestamp_part_2", "cvtd_timestamp"))]
+dim(good_training)
+
+names(good_training)
+
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+make training and validation sets from the good_training set (70%, 30% size respectively):
+```{r, echo = TRUE }
+library(caret)
+trainingIndexes <- createDataPartition(y = good_training$classe, p = 0.7, list = FALSE)
+training <- good_training[trainingIndexes, ]
+dim(training)
+
+validating <- good_training[-trainingIndexes, ]
+dim(validating)
+
+```
+
+
+create the 'testing' data frame from raw_testing, by leaving the same columns that are present in the training data set.
+
+
+```{r, echo = TRUE }
+testing <- raw_testing[ , which(names(raw_testing) %in% as.vector(names(training)) )]
+ncol(testing)
+```
+
+notice: testing does not include the column 'classe', as not provided in the original pml-testing.csv file, in fact the quiz requires to predict the values of classe.
+
+## Processing
+
+In the following we will use the Random Forest classification method with the caret::train() function; in order to speed up the model training process we will tell R to make use of parallel processing and we will configure the trainControl object for cross validation (see https://github.com/lgreski/datasciencectacontent/blob/master/markdown/pml-randomForestPerformance.md).
+
+###  Configure parallel processing
+ 
+```{r, echo = TRUE }
+library(parallel)
+library(doParallel)
+cluster <- makeCluster(detectCores() - 1)
+registerDoParallel(cluster)
+cluster
+```
+
+### Cross Validation
+
+By default train() uses a bootstrap re-sampling process which is very time consuming. In the following we  replace it with a 3-fold cross-validation which has no impact on accuracy but significantly speeds up the execution. The  trainControl() from caret is used:
+
+```{r, echo = TRUE }
+library(caret)
+fitControl <- trainControl(method = "cv", number = 3, allowParallel = TRUE)    
+```
+    
+### Model Training
+
+Train a Random Forest model using the train control above defined.
+```{r, echo = TRUE }    
+modFit  <- train(classe ~ ., method = "rf", data = training, trControl = fitControl)
+```    
+
+
+De-register parallel processing cluster
+```{r, echo = TRUE }    
+stopCluster(cluster)
+registerDoSEQ()
+```    
+
+Inspect the trained model
+```{r, echo = TRUE }    
+modFit
+modFit$finalModel
+confusionMatrix.train(modFit)
+```    
+
+Most important variables (list and plot) and accuracy by Predictor Count
+```{r, echo = TRUE }   
+library(randomForest)
+varImp(modFit)
+varImpPlot(modFit$finalModel, main="Variable Importance Plot: Random Forest")
+plot(modFit,main="Accuracy by Predictor Count")
+```
+
+## Predictions on testing sample
+```{r, echo = TRUE }    
+predict(modFit, newdata=testing)
+```    
+
+ 
+## Out of sample error 
+
+Use the model to predict on the validating data and calculate the accuracy and estimate the out-of-sample error 
+```{r, echo = TRUE }    
+predOnValidating <- predict(modFit, newdata=validating)
+ 
+# Number of predictions
+length(predOnValidating) 
+#  accuracy of the predicted model
+predValAccuracy <- sum(predOnValidating == validating$classe)/length(predOnValidating)
+predValAccuracy
+``` 
+
+build the confusion matrix to see the accuracy of the model (alternative measure)
+```{r, echo = TRUE }    
+confusionMatrix(predOnValidating, validating$classe)
+```
+
+Out of sample error estimation
+```{r, echo = TRUE }    
+oosError <- 1 - predValAccuracy
+oosError
+oosErrorPercentage <- oosError * 100
+oosErrorPercentage
+``` 
+The estimated out of sample error is `r round(oosErrorPercentage, digits = 2)` %.
+
+
